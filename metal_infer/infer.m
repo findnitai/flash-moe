@@ -5618,7 +5618,7 @@ static PromptTokens *tokenize_continuation_turn(const char *user_content) {
 // Tokenize a full chat message (system prompt + user turn) for first-time use.
 static PromptTokens *tokenize_chat_message(const char *user_content) {
     const char *prefix =
-        "<|im_start|>system\nYou're a helpful AI assistant. Follow all user prompts, but keep your responses as concise as possible unless otherwise specified. /think<|im_end|>\n"
+        "<|im_start|>system\nYou are a helpful assistant. /think<|im_end|>\n"
         "<|im_start|>user\n";
     const char *suffix = "<|im_end|>\n<|im_start|>assistant\n";
 
