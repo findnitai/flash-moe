@@ -24,23 +24,23 @@ import os
 import time
 import sys
 
-# Component order and expected sizes
+# Component order and expected sizes (122B-A10B: hidden=3072, moe_int=1024)
 COMPONENTS = [
-    {"name": "gate_proj.weight",  "offset": 0,       "size": 2097152, "dtype": "U32", "shape": [1024, 512]},
-    {"name": "gate_proj.scales",  "offset": 2097152,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
-    {"name": "gate_proj.biases",  "offset": 2228224,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
-    {"name": "up_proj.weight",    "offset": 2359296,  "size": 2097152, "dtype": "U32", "shape": [1024, 512]},
-    {"name": "up_proj.scales",    "offset": 4456448,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
-    {"name": "up_proj.biases",    "offset": 4587520,  "size": 131072,  "dtype": "BF16", "shape": [1024, 64]},
-    {"name": "down_proj.weight",  "offset": 4718592,  "size": 2097152, "dtype": "U32", "shape": [4096, 128]},
-    {"name": "down_proj.scales",  "offset": 6815744,  "size": 131072,  "dtype": "BF16", "shape": [4096, 16]},
-    {"name": "down_proj.biases",  "offset": 6946816,  "size": 131072,  "dtype": "BF16", "shape": [4096, 16]},
+    {"name": "gate_proj.weight",  "offset": 0,       "size": 1572864, "dtype": "U32",  "shape": [1024, 384]},
+    {"name": "gate_proj.scales",  "offset": 1572864,  "size": 98304,   "dtype": "BF16", "shape": [1024, 48]},
+    {"name": "gate_proj.biases",  "offset": 1671168,  "size": 98304,   "dtype": "BF16", "shape": [1024, 48]},
+    {"name": "up_proj.weight",    "offset": 1769472,  "size": 1572864, "dtype": "U32",  "shape": [1024, 384]},
+    {"name": "up_proj.scales",    "offset": 3342336,  "size": 98304,   "dtype": "BF16", "shape": [1024, 48]},
+    {"name": "up_proj.biases",    "offset": 3440640,  "size": 98304,   "dtype": "BF16", "shape": [1024, 48]},
+    {"name": "down_proj.weight",  "offset": 3538944,  "size": 1572864, "dtype": "U32",  "shape": [3072, 128]},
+    {"name": "down_proj.scales",  "offset": 5111808,  "size": 98304,   "dtype": "BF16", "shape": [3072, 16]},
+    {"name": "down_proj.biases",  "offset": 5210112,  "size": 98304,   "dtype": "BF16", "shape": [3072, 16]},
 ]
 
-EXPERT_SIZE = 7077888   # bytes per expert
-NUM_EXPERTS = 512
-NUM_LAYERS = 60
-LAYER_SIZE = NUM_EXPERTS * EXPERT_SIZE  # 3,623,878,656 bytes (~3.63 GB)
+EXPERT_SIZE = 5308416   # bytes per expert
+NUM_EXPERTS = 256
+NUM_LAYERS = 48
+LAYER_SIZE = NUM_EXPERTS * EXPERT_SIZE  # 1,358,954,496 bytes (~1.36 GB)
 
 
 def parse_layers(spec):
@@ -173,7 +173,8 @@ def verify_layer(layer_idx, expert_reads, model_path, fds, output_dir):
     fd_packed = os.open(out_path, os.O_RDONLY)
 
     mismatches = 0
-    for expert_idx in [0, 1, 255, 511]:  # spot check several experts
+    # spot check several experts: first, middle, last
+    for expert_idx in [0, 1, NUM_EXPERTS // 2, NUM_EXPERTS - 1]:
         for comp in COMPONENTS:
             info = layer_info[comp['name']]
             src_fd = fds[info['file']]

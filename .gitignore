@@ -30,3 +30,9 @@ __pycache__/
 *.npz
 logs/
 *.log
+
+# 122B generation scripts output
+expert_index.json
+tokenizer.bin
+vocab.bin
+qwen-122b-*

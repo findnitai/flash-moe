@@ -27,6 +27,8 @@
 #define MAX_RESPONSE (1024 * 1024)
 #define SESSIONS_DIR_BASE ".flash-moe/sessions"
 
+static int g_current_k = 4; // Experts per token
+
 static double now_ms(void) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -476,10 +478,11 @@ static char *stream_response(int sock, int show_thinking) {
     double gen_time = t_first > 0 ? now_ms() - t_first : 0;
     int gen_tokens = tokens > 1 ? tokens - 1 : 0;
     printf("\n\n");
-    if (gen_tokens > 0 && gen_time > 0)
-        printf("[%d tokens, %.1f tok/s, TTFT %.1fs]\n\n",
-               tokens, gen_tokens * 1000.0 / gen_time,
-               t_first > 0 ? (t_first - now_ms() + gen_time + (t_first - (now_ms() - gen_time))) / 1000.0 : 0);
+    if (gen_tokens > 0 && gen_time > 0) {
+        printf("[%d tokens, %.1f tok/s, TTFT %.2fs]\n",
+               tokens, gen_tokens * 1000.0 / gen_time, (t_first - t_start) / 1000.0);
+        printf("[%d total experts used in 48 layers (K=%d + shared)]\n\n", 48 * (g_current_k + 1), g_current_k);
+    }
 
     return response;
 }
@@ -488,10 +491,13 @@ static char *stream_response(int sock, int show_thinking) {
 // Main
 // ============================================================================
 
+// Global settings
+// (moved to top)
+
 int main(int argc, char **argv) {
     int port = 8000;
     int max_tokens = 8192;
-    int show_thinking = 0;
+    int show_thinking = 1;
     const char *resume_id = NULL;
 
     static struct option long_options[] = {
@@ -500,6 +506,7 @@ int main(int argc, char **argv) {
         {"show-think",  no_argument,       0, 's'},
         {"resume",      required_argument, 0, 'r'},
         {"sessions",    no_argument,       0, 'l'},
+        {"k",           required_argument, 0, 'k'},
         {"help",        no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -514,6 +521,7 @@ int main(int argc, char **argv) {
             case 's': show_thinking = 1; break;
             case 'r': resume_id = optarg; break;
             case 'l': session_list(); return 0;
+            case 'k': g_current_k = atoi(optarg); break;
             case 'h':
                 printf("Usage: %s [options]\n", argv[0]);
                 printf("  --port N         Server port (default: 8000)\n");
@@ -521,6 +529,7 @@ int main(int argc, char **argv) {
                 printf("  --show-think     Show <think> blocks (dimmed)\n");
                 printf("  --resume ID      Resume a previous session\n");
                 printf("  --sessions       List saved sessions\n");
+                printf("  --k N            Set experts per token for stats (default: 4)\n");
                 printf("  --help           This message\n");
                 return 0;
             default: return 1;

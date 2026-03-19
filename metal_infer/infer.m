@@ -1,14 +1,14 @@
 /*
- * infer.m — Complete Qwen3.5-397B inference engine using Metal
+ * infer.m — Complete Qwen3.5-122B-A10B inference engine using Metal
  *
- * Full forward pass: embedding -> 60 transformer layers -> norm -> lm_head -> sample
+ * Full forward pass: embedding -> 48 transformer layers -> norm -> lm_head -> sample
  * Non-expert weights loaded from model_weights.bin (mmap'd at startup)
  * Expert weights loaded from packed_experts/ per layer per token (pread)
  *
- * Architecture: Qwen3.5-397B-A17B (MoE)
- *   - 60 layers: 45 linear attention (GatedDeltaNet) + 15 full attention
- *   - hidden_size=4096, head_dim=256, num_attention_heads=32, num_kv_heads=2
- *   - 512 experts/layer, 10 active (we use K=4 for speed)
+ * Architecture: Qwen3.5-122B-A10B (MoE)
+ *   - 48 layers: 36 linear attention (GatedDeltaNet) + 12 full attention
+ *   - hidden_size=3072, head_dim=256, num_attention_heads=32, num_kv_heads=2
+ *   - 256 experts/layer, 8 active (we use K=4 for speed)
  *   - Shared expert per layer (always active)
  *   - Linear attention: conv1d(kernel=4) + gated delta recurrence
  *   - Full attention: standard QKV + scaled dot product + RoPE
@@ -68,15 +68,15 @@
 // Model constants
 // ============================================================================
 
-#define HIDDEN_DIM          4096
-#define NUM_LAYERS          60
+#define HIDDEN_DIM          3072
+#define NUM_LAYERS          48
 #define NUM_ATTN_HEADS      32
 #define NUM_KV_HEADS        2
 #define HEAD_DIM            256
 #define VOCAB_SIZE          248320
 #define RMS_NORM_EPS        1e-6f
-#define NUM_EXPERTS         512
-#define NUM_EXPERTS_PER_TOK 10
+#define NUM_EXPERTS         256
+#define NUM_EXPERTS_PER_TOK 8
 #define MOE_INTERMEDIATE    1024
 #define SHARED_INTERMEDIATE 1024
 #define FULL_ATTN_INTERVAL  4
@@ -84,7 +84,7 @@
 #define BITS                4
 
 // Linear attention (GatedDeltaNet) constants
-#define LINEAR_NUM_V_HEADS  64
+#define LINEAR_NUM_V_HEADS  64   // same as 397B for 122B-A10B
 #define LINEAR_NUM_K_HEADS  16
 #define LINEAR_KEY_DIM      128   // head_k_dim
 #define LINEAR_VALUE_DIM    128   // head_v_dim
@@ -98,23 +98,35 @@
 #define PARTIAL_ROTARY      0.25f
 #define ROTARY_DIM          (int)(HEAD_DIM * PARTIAL_ROTARY)  // 64
 
-// Expert packed binary layout (from existing code)
-#define EXPERT_SIZE         7077888
+// Expert packed binary layout for Qwen3.5-122B-A10B (moe_intermediate=1024, hidden=3072)
+// 4-bit: gate/up [1024,3072] -> weights [1024,384] U32, scales/biases [1024,48] BF16
+//        down [3072,1024] -> weights [3072,128] U32, scales/biases [3072,16] BF16
+#define EXPERT_SIZE         5308416
+// 4-bit expert offsets within packed expert
+#define GATE_W_OFF_4  0
+#define GATE_S_OFF_4  1572864
+#define GATE_B_OFF_4  1671168
+#define UP_W_OFF_4    1769472
+#define UP_S_OFF_4    3342336
+#define UP_B_OFF_4    3440640
+#define DOWN_W_OFF_4  3538944
+#define DOWN_S_OFF_4  5111808
+#define DOWN_B_OFF_4  5210112
 
-// 2-bit expert layout (from repack_experts_2bit.py)
-#define EXPERT_SIZE_2BIT    3932160
+// 2-bit expert layout: weights halved (16 vals/uint32 vs 8)
+#define EXPERT_SIZE_2BIT    2949120
 #define GATE_W_OFF_2  0
-#define GATE_S_OFF_2  1048576
-#define GATE_B_OFF_2  1179648
-#define UP_W_OFF_2    1310720
-#define UP_S_OFF_2    2359296
-#define UP_B_OFF_2    2490368
-#define DOWN_W_OFF_2  2621440
-#define DOWN_S_OFF_2  3670016
-#define DOWN_B_OFF_2  3801088
+#define GATE_S_OFF_2  786432
+#define GATE_B_OFF_2  884736
+#define UP_W_OFF_2    983040
+#define UP_S_OFF_2    1769472
+#define UP_B_OFF_2    1867776
+#define DOWN_W_OFF_2  1966080
+#define DOWN_S_OFF_2  2752512
+#define DOWN_B_OFF_2  2850816
 
 // KV cache maximum context length
-#define MAX_SEQ_LEN 1048576  // 1M context — only 15 full-attn layers need KV cache, ~15GB at max
+#define MAX_SEQ_LEN 32768  // 32k context
 #define GPU_KV_SEQ  8192     // GPU KV buffer pre-allocation (grows if exceeded, falls back to CPU attn)
 
 // Special tokens
@@ -123,7 +135,7 @@
 #define THINK_START_TOKEN   248068  // <think>
 #define THINK_END_TOKEN     248069  // </think>
 
-#define MODEL_PATH_DEFAULT "/Users/danielwoods/.cache/huggingface/hub/models--mlx-community--Qwen3.5-397B-A17B-4bit/snapshots/39159bd8aa74f5c8446d2b2dc584f62bb51cb0d3"
+#define MODEL_PATH_DEFAULT "/Users/findnitai/.cache/huggingface/hub/models--mlx-community--Qwen3.5-122B-A10B-4bit"
 
 // ============================================================================
 // Timing helper
@@ -919,7 +931,7 @@ typedef struct {
     id<MTLBuffer> buf_h_mid;        // [HIDDEN_DIM floats] residual+oproj result
     id<MTLBuffer> buf_sum_sq;       // [1 float] for RMS norm reduction
     // GPU attention buffers (for full attention layers)
-    #define NUM_FULL_ATTN_LAYERS 15
+    #define NUM_FULL_ATTN_LAYERS 12
     id<MTLBuffer> buf_kv_k[NUM_FULL_ATTN_LAYERS];  // K cache per full-attn layer
     id<MTLBuffer> buf_kv_v[NUM_FULL_ATTN_LAYERS];  // V cache per full-attn layer
     id<MTLBuffer> buf_attn_q;       // [NUM_ATTN_HEADS * HEAD_DIM floats] all query heads
@@ -941,7 +953,7 @@ typedef struct {
     id<MTLComputePipelineState> compute_decay_beta; // g_decay and beta_gate for delta-net
     id<MTLComputePipelineState> gated_rms_norm;  // z-gated output normalization
     // Persistent GPU state buffers for linear attention layers
-    #define NUM_LINEAR_LAYERS 45
+    #define NUM_LINEAR_LAYERS 36
     id<MTLBuffer> buf_delta_state[NUM_LINEAR_LAYERS];   // [64*128*128] float per layer
     id<MTLBuffer> buf_conv_state[NUM_LINEAR_LAYERS];     // [3*12288] float per layer
     // Scratch buffers for delta-net inputs/outputs
@@ -1477,9 +1489,9 @@ static void gpu_encode_expert_forward_slot(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1573,9 +1585,9 @@ static void gpu_encode_expert_forward_slot_buf(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1673,9 +1685,9 @@ static void gpu_encode_experts_batched(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        gate_w_off = GATE_W_OFF_4; gate_s_off = GATE_S_OFF_4; gate_b_off = GATE_B_OFF_4;
+        up_w_off   = UP_W_OFF_4;   up_s_off   = UP_S_OFF_4;   up_b_off   = UP_B_OFF_4;
+        down_w_off = DOWN_W_OFF_4; down_s_off = DOWN_S_OFF_4; down_b_off = DOWN_B_OFF_4;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -1758,15 +1770,15 @@ static void gpu_encode_expert_forward(
     MetalCtx *ctx,
     id<MTLCommandBuffer> cmdbuf
 ) {
-    NSUInteger gate_w_off = 0;
-    NSUInteger gate_s_off = 2097152;
-    NSUInteger gate_b_off = 2228224;
-    NSUInteger up_w_off   = 2359296;
-    NSUInteger up_s_off   = 4456448;
-    NSUInteger up_b_off   = 4587520;
-    NSUInteger down_w_off = 4718592;
-    NSUInteger down_s_off = 6815744;
-    NSUInteger down_b_off = 6946816;
+    NSUInteger gate_w_off = GATE_W_OFF_4;
+    NSUInteger gate_s_off = GATE_S_OFF_4;
+    NSUInteger gate_b_off = GATE_B_OFF_4;
+    NSUInteger up_w_off   = UP_W_OFF_4;
+    NSUInteger up_s_off   = UP_S_OFF_4;
+    NSUInteger up_b_off   = UP_B_OFF_4;
+    NSUInteger down_w_off = DOWN_W_OFF_4;
+    NSUInteger down_s_off = DOWN_S_OFF_4;
+    NSUInteger down_b_off = DOWN_B_OFF_4;
 
     uint32_t gate_up_out = MOE_INTERMEDIATE;
     uint32_t gate_up_in  = HIDDEN_DIM;
@@ -1882,9 +1894,11 @@ static void gpu_expert_forward(
         up_w_off   = UP_W_OFF_2;   up_s_off   = UP_S_OFF_2;   up_b_off   = UP_B_OFF_2;
         down_w_off = DOWN_W_OFF_2; down_s_off = DOWN_S_OFF_2; down_b_off = DOWN_B_OFF_2;
     } else {
-        gate_w_off = 0;        gate_s_off = 2097152;  gate_b_off = 2228224;
-        up_w_off   = 2359296;  up_s_off   = 4456448;  up_b_off   = 4587520;
-        down_w_off = 4718592;  down_s_off = 6815744;  down_b_off = 6946816;
+        // 4-bit offsets for 122B: gate/up [1024, 384] U32 + [1024,48] BF16 scales/biases
+        //                         down [3072, 128] U32 + [3072,16] BF16 scales/biases
+        gate_w_off = 0;        gate_s_off = 1572864;  gate_b_off = 1671168;
+        up_w_off   = 1769472;  up_s_off   = 3342336;  up_b_off   = 3440640;
+        down_w_off = 3538944;  down_s_off = 5111808;  down_b_off = 5210112;
     }
     id<MTLComputePipelineState> expert_pipe = g_use_2bit ? ctx->matvec_2bit : ctx->matvec_v3;
 
@@ -2721,14 +2735,14 @@ static void moe_forward(
                 }
 
                 uint32_t *gw = (uint32_t *)expert_data;
-                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 2097152));
-                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 2228224));
-                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 2359296));
-                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 4456448));
-                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 4587520));
-                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 4718592));
-                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 6815744));
-                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 6946816));
+                uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : GATE_S_OFF_4));
+                uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : GATE_B_OFF_4));
+                uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : UP_W_OFF_4));
+                uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : UP_S_OFF_4));
+                uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : UP_B_OFF_4));
+                uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : DOWN_W_OFF_4));
+                uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : DOWN_S_OFF_4));
+                uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : DOWN_B_OFF_4));
 
                 float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
                 float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
@@ -3531,7 +3545,7 @@ static void infer_prefetch_shutdown(void) {
 
 // ============================================================================
 // Per-layer weight pointer cache — built once, eliminates 40+ snprintf+lookup
-// per layer per token. With 60 layers and 15 tokens = 36,000 lookups saved.
+// per layer per token. With 48 layers and 15 tokens = 28,800 lookups saved.
 // ============================================================================
 
 typedef struct {
@@ -3824,7 +3838,7 @@ static void discard_deferred_experts(void) {
 //   4. GPU-side combine in CMD3 (eliminates CPU deferred_wait + combine + norm)
 // ============================================================================
 
-// Static scratch buffers — allocated once, reused across all 60 layers per token.
+// Static scratch buffers — allocated once, reused across all 48 layers per token.
 // Eliminates ~20 malloc/free per layer = ~1200 alloc/free per token.
 static float *s_normed    = NULL;   // [HIDDEN_DIM]
 static float *s_residual  = NULL;   // [HIDDEN_DIM]
@@ -5247,14 +5261,14 @@ static void fused_layer_forward(
 
             // CPU fallback offsets — use 4-bit layout (2-bit CPU path not yet implemented)
             uint32_t *gw = (uint32_t *)expert_data;
-            uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : 2097152));
-            uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : 2228224));
-            uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : 2359296));
-            uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : 4456448));
-            uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : 4587520));
-            uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : 4718592));
-            uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : 6815744));
-            uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : 6946816));
+            uint16_t *gs_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_S_OFF_2 : GATE_S_OFF_4));
+            uint16_t *gb_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? GATE_B_OFF_2 : GATE_B_OFF_4));
+            uint32_t *uw = (uint32_t *)((char *)expert_data + (g_use_2bit ? UP_W_OFF_2 : UP_W_OFF_4));
+            uint16_t *us_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_S_OFF_2 : UP_S_OFF_4));
+            uint16_t *ub_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? UP_B_OFF_2 : UP_B_OFF_4));
+            uint32_t *dw = (uint32_t *)((char *)expert_data + (g_use_2bit ? DOWN_W_OFF_2 : DOWN_W_OFF_4));
+            uint16_t *ds_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_S_OFF_2 : DOWN_S_OFF_4));
+            uint16_t *db_p = (uint16_t *)((char *)expert_data + (g_use_2bit ? DOWN_B_OFF_2 : DOWN_B_OFF_4));
 
             float *gate_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
             float *up_proj_out = malloc(MOE_INTERMEDIATE * sizeof(float));
@@ -5766,7 +5780,7 @@ static void serve_loop(
     static uint64_t req_counter = 0;
 
     // ---- System prompt cache: prefill system prompt once at startup ----
-    // Tokenize the system prompt and run it through all 60 layers.
+    // Tokenize the system prompt and run it through all 48 layers.
     // Save the resulting KV cache + linear attention state as a snapshot.
     // On each request, restore the snapshot instead of re-prefilling.
     fprintf(stderr, "[serve] Pre-caching system prompt...\n");
@@ -6109,7 +6123,7 @@ static void serve_loop(
                     memcpy(hidden, serve_embed_batch + (size_t)(pt->count - 1) * HIDDEN_DIM,
                            HIDDEN_DIM * sizeof(float));
                 } else {
-                    embed_lookup(wf, pt->ids[0], hidden);
+                    embed_lookup(wf, pt->ids[pt->count - 1], hidden);
                 }
                 for (int layer = 0; layer < NUM_LAYERS; layer++) {
                     int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
@@ -6400,7 +6414,7 @@ int main(int argc, char **argv) {
             g_expert_cache = expert_cache_new(g_metal->device, cache_entries);
         }
 
-        printf("=== Qwen3.5-397B-A17B Metal Inference Engine ===\n");
+        printf("=== Qwen3.5-122B-A10B Metal Inference Engine ===\n");
         printf("Model:    %s\n", model_path);
         printf("Weights:  %s\n", weights_path);
         printf("Manifest: %s\n", manifest_path);
@@ -6619,7 +6633,7 @@ int main(int argc, char **argv) {
                 memcpy(hidden, embed_batch + (size_t)token_idx * HIDDEN_DIM,
                        HIDDEN_DIM * sizeof(float));
 
-                // Run through all 60 transformer layers
+                // Run through all 48 transformer layers
                 for (int layer = 0; layer < NUM_LAYERS; layer++) {
                     int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
                     fused_layer_forward(wf, layer, hidden,
@@ -6740,7 +6754,7 @@ int main(int argc, char **argv) {
             cache_telemetry_note_token();
             embed_lookup(wf, next_token, hidden);
 
-            // Run 60 layers (fused: 1+K cmd buffers per layer)
+            // Run 48 layers (fused: 1+K cmd buffers per layer)
             for (int layer = 0; layer < NUM_LAYERS; layer++) {
                 int is_full = ((layer + 1) % FULL_ATTN_INTERVAL == 0);
                 fused_layer_forward(wf, layer, hidden,

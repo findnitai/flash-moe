@@ -1,31 +1,35 @@
-# Flash-MoE: Running a 397B Parameter Model on a Laptop
+# Flash-MoE: High-Performance MoE on Mac (397B & 122B Models)
 
-> **[Read the paper](paper/flash_moe.pdf)** — Full technical details, 90+ experiments, and the story of how an AI and a human built this in 24 hours.
+> **Note**: This is a fork of the original [Flash-MoE](https://github.com/danveloper/flash-moe) repository, specifically adapted to run the **Qwen3.5-122B-A10B** model on memory-constrained Macs (e.g., M4 Pro with 24GB RAM).
+> 
+> **[Read the original paper](paper/flash_moe.pdf)** — Full technical details, 90+ experiments, and the story of how an AI and a human built this in 24 hours.
 
-Pure C/Metal inference engine that runs **Qwen3.5-397B-A17B** (a 397 billion parameter Mixture-of-Experts model) on a MacBook Pro with 48GB RAM at **5.5+ tokens/second** with production-quality output.
+Pure C/Metal inference engine that runs **Qwen3.5-397B-A17B** and **Qwen3.5-122B-A10B** (Mixture-of-Experts models) on a MacBook Pro with 24GB-48GB RAM at up to **7.6+ tokens/second** with production-quality output.
 
-The entire 209GB model streams from SSD through a custom Metal compute pipeline. No Python. No frameworks. Just C, Objective-C, and hand-tuned Metal shaders.
+The models stream from SSD through a custom Metal compute pipeline. No Python in the inference loop. Just C, Objective-C, and hand-tuned Metal shaders.
 
 ## Results
 
-| Configuration | tok/s | Quality | Notes |
-|--------------|-------|---------|-------|
-| 2-bit experts, K=4 | **5.55** | Excellent | Current best. 120GB on disk. |
-| 4-bit experts, K=4 (warm) | 4.80 | Excellent | 209GB on disk. Page-cache dependent. |
-| 4-bit experts, K=4 (cold) | 2.83 | Excellent | Steady-state with cold cache. |
-| Peak single token | **7.05** | — | Warm cache, 2-bit. |
+| Model | Configuration | tok/s | Quality | Notes |
+|-------|---------------|-------|---------|-------|
+| 122B-A10B | **2-bit experts (M4 Pro)** | **7.62** | Perfect | 35GB on disk. 24GB RAM. |
+| 122B-A10B | 4-bit experts (M4 Pro) | **6.12** | Perfect | 61GB on disk. SSD-bound. |
+| 397B-A17B | **2-bit experts (M3 Max)** | **5.55** | Excellent | 120GB on disk. 48GB RAM. |
+| 397B-A17B | 4-bit experts (M3 Max) | 4.80 | Excellent | 209GB on disk. |
 
 ## Hardware
 
-- **Machine**: MacBook Pro, Apple M3 Max
-- **Chip**: 16-core CPU (12P + 4E), 40-core GPU, 16-core ANE
-- **Memory**: 48 GB unified (~400 GB/s bandwidth)
-- **SSD**: 1TB Apple Fabric, **17.5 GB/s sequential read** (measured)
-- **macOS**: 26.2 (Darwin 25.2.0)
+- **Machine A**: MacBook Pro, Apple M3 Max (48GB RAM, 1TB SSD)
+- **Machine B**: MacBook Pro, Apple M4 Pro (24GB RAM, 512GB SSD)
+- **Measured SSD Read**: up to **17.5 GB/s** (M3 Max) and **~6.5 GB/s** (M4 Pro)
 
 ## Architecture
 
-The model has 60 transformer layers: 45 GatedDeltaNet (linear attention) + 15 standard full attention. Each layer has 512 experts, of which K=4 are activated per token (plus one shared expert). Hidden dimension is 4096.
+- **For 397B-A17B**: 60 layers (45 GatedDeltaNet + 15 standard attention). Hidden dim 4096. 512 experts.
+- **For 122B-A10B**: 48 layers (36 GatedDeltaNet + 12 standard attention). Hidden dim 3072. 256 experts.
+- **Expert Streaming**: K=4 experts/layer read from SSD via `pread()` (mmap for weights).
+- **2-bit Quantization**: Custom affine dequantization in Metal (16 values/U32).
+- **F_NOCACHE**: Mandatory for memory-constrained machines (24GB) to avoid OS page thrash.
 
 ### Key Techniques
 
@@ -58,40 +62,39 @@ CMD3(prev) → CMD1: attention projections  [0.87ms GPU]
            → CMD3: expert forward + combine + norm (DEFERRED)  [0.03ms encode]
 ```
 
-## Quick Start
+## Quick Start (Shortcut)
+
+The easiest way to run the 122B model on your Mac is using the `flash.sh` shortcut:
 
 ```bash
 cd metal_infer
 make
-# 4-bit inference (needs packed_experts/ directory)
-./infer --prompt "Explain quantum computing" --tokens 100
+cd ..
 
-# 2-bit inference (44% faster, needs packed_experts_2bit/)
-./infer --prompt "Explain quantum computing" --tokens 100 --2bit
+# Start the server (Speed mode: 2-bit, K=4)
+./flash.sh server speed
 
-# Interactive chat
-./chat --2bit
+# Open a new terminal to start the chat client
+./flash.sh chat speed
 ```
+
+*For maximum accuracy (4-bit, K=8), use `./flash.sh server accuracy` and `./flash.sh chat accuracy`.*
 
 ## Project Structure
 
 ```
 metal_infer/
-  infer.m              # Complete inference engine (~5000 lines)
-  shaders.metal        # Metal compute kernels (~1100 lines)
-  main.m               # MoE-only benchmark
-  Makefile             # Build system
-  extract_weights.py   # Creates model_weights.bin from safetensors
-  encode_prompt.py     # Text → token IDs via HuggingFace tokenizer
-  repack_experts_2bit.py  # 4-bit → 2-bit expert requantization
-  model_weights.bin    # Non-expert weights (5.5GB, mmap'd)
-  model_weights.json   # Tensor manifest
-  vocab.bin            # Vocabulary for token decoding
-
-stream_infer.py        # Reference Python/MLX implementation
-repack_experts.py      # 4-bit expert packing from safetensors
-progress.py            # Results visualization
-results.tsv            # Experiment log
+  infer.m              # Complete inference engine (~6800 lines)
+  shaders.metal        # Metal compute kernels (~1200 lines)
+  chat.m               # Interactive TUI chat client (TUI + Markdown)
+  tokenizer.h          # Pure C BPE Tokenizer (GPT-2/Qwen style)
+  Makefile             # Build system (make chat)
+  gen_expert_index.py  # Maps weights to layers from safetensors index
+  export_tokenizer.py  # Binary BPET export from tokenizer.json
+  gen_simple_vocab.py  # Decodes BPE byte-level strings for TUI
+  repack_experts_2bit.py  # 4-bit -> 2-bit expert requantization
+  repack_experts.py    # 4-bit expert packing from safetensors
+  flash.sh             # Convenience script for quick launch
 ```
 
 ## What We Tried (and What Worked)
@@ -110,6 +113,17 @@ results.tsv            # Experiment log
 | Speculative early routing | Cache pollution + overhead | Reverted |
 | GPU delta-net (195MB state) | Memory pressure > compute savings | Disabled |
 | CMD1+CMD2 merge via GPU RoPE | Dispatch overhead > sync savings | Reverted |
+| Reduced `MAX_SEQ_LEN` | Prevents OOM by limiting KV cache on 24GB Macs | **KEEP** |
+| BPE Byte-Decoding Layer | Fixes garbage chars (Ġ, Ċ) in chat | **KEEP** |
+| Custom Expert Indexer | Handles Qwen3.5 122B naming variations | **KEEP** |
+| SSD pread() multi-expert | Much faster than mmap on memory-constrained Macs | **KEEP** |
+
+## Adaptation for Qwen3.5-122B-A10B
+
+1. **Architecture**: Adjusted `HIDDEN_DIM`, `NUM_LAYERS`, and expert counts in `infer.m`.
+2. **Quantization**: Calculated new offsets for 2-bit expert packing to handle 1024-intermediate dim.
+3. **KV Cache**: Reduced `MAX_SEQ_LEN` from 1M to 32k to fit within the 24GB unified memory.
+4. **Tokenizer**: Expanded `vocab.bin` to include special tokens like `<think>` and `</think>`.
 
 ## Safety
 
