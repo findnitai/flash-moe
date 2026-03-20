@@ -83,3 +83,20 @@ Run inference with the `infer_35b` binary:
 - **Fused in_proj_qkv**: The model uses a fused projection for query, key, and value in the linear attention layers.
 - **Explicit HEAD_DIM**: Unlike smaller models, 35B uses an explicit `head_dim=256` which is not derived purely from `hidden_size / num_heads`.
 - **Smaller Expert Size**: Experts are ~1.7MB each (4-bit), significantly smaller than the 122B model's 5.1MB experts.
+
+## Performance & Results
+
+Tested on **Apple M4 Pro (24GB RAM)** with **k=8** (Max Accuracy mode):
+
+- **Throughput**: **16.34 tokens/second**
+- **TTFT**: ~3.7s (including prefill)
+
+### Sample Output
+
+**Prompt**: *"Write a detailed explanation of how a Mixture-of-Experts (MoE) transformer architecture works, including the gating mechanism and expert routing."*
+
+**Response**:
+> "The **Mixture-of-Experts (MoE)** architecture is a specialized design within the Transformer family that aims to drastically increase model capacity... It achieves this by activating only a subset of the model's parameters for any given input token...
+>
+> 1. **Core Concept: Sparse Activation**
+> In an MoE Transformer, the standard FFN layer is replaced by an MoE Layer. This layer consists of N distinct sub-networks, called Experts... For any specific input token, the model does not use all N experts. Instead, it selects only the top-K experts..."
