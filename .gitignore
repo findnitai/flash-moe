@@ -36,3 +36,9 @@ expert_index.json
 tokenizer.bin
 vocab.bin
 qwen-122b-*
+
+# 35B model directories (downloaded weights, not for version control)
+qwen-35b-*
+qwen-35b-4bit/
+qwen-35b-config/
+expert_index_35b.json
