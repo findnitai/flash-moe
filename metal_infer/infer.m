@@ -66,33 +66,44 @@
 
 // ============================================================================
 // Model constants
-// =========================================================================// ---- Model Dimensions Configuration ----
+// ---- Model Dimensions Configuration ----
 #ifdef QWEN_35B
 // Qwen3.5-35B-A3B configs
 #define NUM_LAYERS          40
 #define HIDDEN_DIM          2048
 #define NUM_HEADS           16
 #define NUM_KV_HEADS        2
+#define HEAD_DIM            256   // explicit: NOT HIDDEN_DIM/NUM_HEADS (128), config says 256
 #define NUM_EXPERTS         256
 #define EXPERT_INTERMEDIATE 512
 #define SHARED_INTERMEDIATE 512
 #define VOCAB_SIZE          248320
 #define FULL_ATTN_INTERVAL  4
+// Linear attention (GatedDeltaNet) constants for 35B
+#define LINEAR_NUM_V_HEADS  32
+#define LINEAR_NUM_K_HEADS  16
+#define LINEAR_KEY_DIM      128
+#define LINEAR_VALUE_DIM    128
 #else
 // Qwen3.5-122B-A10B configs (Default)
 #define NUM_LAYERS          48
 #define HIDDEN_DIM          3072
-#define NUM_HEADS           24
-#define NUM_KV_HEADS        8
+#define NUM_HEADS           32
+#define NUM_KV_HEADS        2
+#define HEAD_DIM            256   // explicit from config.json (not hidden/heads)
 #define NUM_EXPERTS         256
 #define EXPERT_INTERMEDIATE 1024
 #define SHARED_INTERMEDIATE 1024
 #define VOCAB_SIZE          248320
 #define FULL_ATTN_INTERVAL  4
+// Linear attention (GatedDeltaNet) constants for 122B
+#define LINEAR_NUM_V_HEADS  64
+#define LINEAR_NUM_K_HEADS  16
+#define LINEAR_KEY_DIM      128
+#define LINEAR_VALUE_DIM    128
 #endif
 
-// Derived dimensions
-#define HEAD_DIM            (HIDDEN_DIM / NUM_HEADS)
+// Derived dimensions — HEAD_DIM now defined per-model above
 #define NUM_ATTN_HEADS      NUM_HEADS
 #define RMS_NORM_EPS        1e-6f
 #define NUM_EXPERTS_PER_TOK 8
@@ -100,14 +111,10 @@
 #define GROUP_SIZE          64
 #define BITS                4
 
-// Linear attention (GatedDeltaNet) constants
-#define LINEAR_NUM_V_HEADS  64   // same as 397B for 122B-A10B
-#define LINEAR_NUM_K_HEADS  16
-#define LINEAR_KEY_DIM      128   // head_k_dim
-#define LINEAR_VALUE_DIM    128   // head_v_dim
-#define LINEAR_TOTAL_KEY    (LINEAR_NUM_K_HEADS * LINEAR_KEY_DIM)   // 2048
-#define LINEAR_TOTAL_VALUE  (LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM) // 8192
-#define LINEAR_CONV_DIM     (LINEAR_TOTAL_KEY * 2 + LINEAR_TOTAL_VALUE) // 12288
+// Linear attention (GatedDeltaNet) derived constants
+#define LINEAR_TOTAL_KEY    (LINEAR_NUM_K_HEADS * LINEAR_KEY_DIM)
+#define LINEAR_TOTAL_VALUE  (LINEAR_NUM_V_HEADS * LINEAR_VALUE_DIM)
+#define LINEAR_CONV_DIM     (LINEAR_TOTAL_KEY * 2 + LINEAR_TOTAL_VALUE)
 #define CONV_KERNEL_SIZE    4
 
 // Full attention constants
@@ -115,9 +122,34 @@
 #define PARTIAL_ROTARY      0.25f
 #define ROTARY_DIM          (int)(HEAD_DIM * PARTIAL_ROTARY)  // 64
 
-// Expert packed binary layout for Qwen3.5-122B-A10B (moe_intermediate=1024, hidden=3072)
-// 4-bit: gate/up [1024,3072] -> weights [1024,384] U32, scales/biases [1024,48] BF16
-//        down [3072,1024] -> weights [3072,128] U32, scales/biases [3072,16] BF16
+// Expert packed binary layout — model-specific sizes
+#ifdef QWEN_35B
+// Qwen3.5-35B-A3B: moe_intermediate=512, hidden=2048
+// gate/up .weight [512,256] U32, .scales/biases [512,32] BF16
+// down    .weight [2048,64] U32, .scales/biases [2048,8] BF16
+#define EXPERT_SIZE         1769472
+#define GATE_W_OFF_4  0
+#define GATE_S_OFF_4  524288
+#define GATE_B_OFF_4  557056
+#define UP_W_OFF_4    589824
+#define UP_S_OFF_4    1114112
+#define UP_B_OFF_4    1146880
+#define DOWN_W_OFF_4  1179648
+#define DOWN_S_OFF_4  1703936
+#define DOWN_B_OFF_4  1736704
+// (2-bit not yet supported for 35B)
+#define EXPERT_SIZE_2BIT    EXPERT_SIZE
+#define GATE_W_OFF_2  GATE_W_OFF_4
+#define GATE_S_OFF_2  GATE_S_OFF_4
+#define GATE_B_OFF_2  GATE_B_OFF_4
+#define UP_W_OFF_2    UP_W_OFF_4
+#define UP_S_OFF_2    UP_S_OFF_4
+#define UP_B_OFF_2    UP_B_OFF_4
+#define DOWN_W_OFF_2  DOWN_W_OFF_4
+#define DOWN_S_OFF_2  DOWN_S_OFF_4
+#define DOWN_B_OFF_2  DOWN_B_OFF_4
+#else
+// Qwen3.5-122B-A10B: moe_intermediate=1024, hidden=3072
 #define EXPERT_SIZE         5308416
 // 4-bit expert offsets within packed expert
 #define GATE_W_OFF_4  0
@@ -141,6 +173,7 @@
 #define DOWN_W_OFF_2  1966080
 #define DOWN_S_OFF_2  2752512
 #define DOWN_B_OFF_2  2850816
+#endif
 
 // KV cache maximum context length
 #define MAX_SEQ_LEN 32768  // 32k context

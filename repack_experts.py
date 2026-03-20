@@ -58,10 +58,10 @@ def get_components(hidden_size, moe_intermediate_size):
 NUM_EXPERTS = 256
 
 
-def parse_layers(spec):
+def parse_layers(spec, num_layers=48):
     """Parse layer specification like '0-4' or '0,5,10' or 'all'."""
     if spec is None or spec == 'all':
-        return list(range(NUM_LAYERS))
+        return list(range(num_layers))
     layers = []
     for part in spec.split(','):
         part = part.strip()
@@ -250,6 +250,8 @@ def main():
                         help='Verify offsets without writing')
     parser.add_argument('--verify-only', type=int, default=None, metavar='LAYER',
                         help='Verify a specific layer against originals')
+    parser.add_argument('--output', type=str, default=None,
+                        help='Output directory for packed expert files (default: packed_experts/ inside model dir)')
     args = parser.parse_args()
 
     print("Loading expert index...")
@@ -260,7 +262,7 @@ def main():
     components, expert_size = get_components(hidden_size, moe_intermediate_size)
     num_layers_total = config.get('num_hidden_layers', 48) # Renamed to avoid conflict with 'layers' list
 
-    output_dir = os.path.join(model_path, "packed_experts")
+    output_dir = args.output if args.output else os.path.join(model_path, "packed_experts")
     os.makedirs(output_dir, exist_ok=True)
     print(f"Output directory: {output_dir}")
 
@@ -298,31 +300,32 @@ def main():
         free_gb = free_bytes / (1024**3)
         needed_gb = total_bytes_to_write / (1024**3)
         print(f"Free disk space: {free_gb:.1f} GB, needed: {needed_gb:.1f} GB")
-        if free_bytes < total_bytes:
+        if free_bytes < total_bytes_to_write:
             print(f"WARNING: Not enough free space! Need {needed_gb:.1f} GB but only {free_gb:.1f} GB free.")
             print(f"Hint: use --layers to process a subset, e.g. --layers 0-{int(free_gb / 3.63) - 1}")
             sys.exit(1)
 
-    # Open source files
-    fds = open_source_files(expert_reads, model_path, layers)
+    # Open source files once for all layers
+    fds = open_source_files(expert_reads, model_path, layers_to_process)
 
     if args.verify_only is not None:
-        verify_layer(args.verify_only, expert_reads, model_path, fds, output_dir)
+        verify_layer(args.verify_only, expert_reads, components, expert_size, fds, output_dir)
         for fd in fds.values():
             os.close(fd)
         return
 
     # Write layout.json
-    write_layout(output_dir)
+    write_layout(output_dir, components, expert_size, num_layers_total)
 
     # Repack each layer
     t_start = time.monotonic()
     total_written = 0
+    layer_size = NUM_EXPERTS * expert_size
 
-    for i, layer_idx in enumerate(layers):
+    for i, layer_idx in enumerate(layers_to_process):
         t_layer = time.monotonic()
-        bytes_written, elapsed = repack_layer(
-            layer_idx, expert_reads, model_path, fds, output_dir, dry_run=args.dry_run
+        bytes_written, elapsed = pack_layer(
+            layer_idx, expert_reads, components, expert_size, fds, output_dir, dry_run=args.dry_run
         )
         total_written += bytes_written
 
@@ -330,15 +333,14 @@ def main():
             throughput = bytes_written / elapsed / (1024**3) if elapsed > 0 else float('inf')
             overall_elapsed = time.monotonic() - t_start
             overall_throughput = total_written / overall_elapsed / (1024**3) if overall_elapsed > 0 else 0
-            eta = (len(layers) - i - 1) * (overall_elapsed / (i + 1))
+            eta = (len(layers_to_process) - i - 1) * (overall_elapsed / (i + 1))
             print(f"  Layer {layer_idx:2d}: {bytes_written/1024**3:.2f} GB in {elapsed:.1f}s "
                   f"({throughput:.1f} GB/s) | "
-                  f"Total: {total_written/1024**3:.1f}/{len(layers)*LAYER_SIZE/1024**3:.1f} GB "
+                  f"Total: {total_written/1024**3:.1f}/{len(layers_to_process)*layer_size/1024**3:.1f} GB "
                   f"({overall_throughput:.1f} GB/s avg) | "
                   f"ETA: {eta:.0f}s")
 
-            # Verify this layer immediately
-            if not verify_layer(layer_idx, expert_reads, model_path, fds, output_dir):
+            if not verify_layer(layer_idx, expert_reads, components, expert_size, fds, output_dir):
                 print(f"ABORTING: verification failed for layer {layer_idx}")
                 sys.exit(1)
 
@@ -355,7 +357,7 @@ def main():
         print(f"Throughput: {total_written/total_elapsed/1024**3:.1f} GB/s")
         print(f"Output: {output_dir}")
     elif args.dry_run:
-        print(f"\nDRY RUN complete: {len(layers)} layers validated")
+        print(f"\nDRY RUN complete: {len(layers_to_process)} layers validated")
 
 
 if __name__ == '__main__':

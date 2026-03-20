@@ -22,9 +22,12 @@ LDFLAGS=-framework Metal -framework Foundation -framework Accelerate -lpthread
 # Default target builds the 122B model engine
 all: infer chat
 
-# Target specifically for the 35B model engine
-35b: CFLAGS += -DQWEN_35B
-35b: infer chat
+# Target specifically for the 35B model engine (separate binary)
+35b: infer_35b chat
+
+infer_35b: infer.m
+	$(CC) $(CFLAGS) -DQWEN_35B $(LDFLAGS) $< -o $@
+	@echo "[35B] Built infer_35b"
 
 # Chat TUI (interactive multi-turn)
 CHAT_TARGET = chat
