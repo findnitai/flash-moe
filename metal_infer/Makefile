@@ -16,12 +16,19 @@
 # MTLDevice newLibraryWithSource:, so no offline metal compiler needed.
 
 CC = clang
-CFLAGS = -O2 -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK
-FRAMEWORKS = -framework Metal -framework Foundation -framework Accelerate
-LDFLAGS = -lpthread
+CFLAGS=-O2 -Wall -Wextra -fobjc-arc -DACCELERATE_NEW_LAPACK
+LDFLAGS=-framework Metal -framework Foundation -framework Accelerate -lpthread
 
-TARGET = metal_infer
-MAIN_SRC = main.m
+# Default target builds the 122B model engine
+all: infer chat
+
+# Target specifically for the 35B model engine
+35b: CFLAGS += -DQWEN_35B
+35b: infer chat
+
+# Chat TUI (interactive multi-turn)
+CHAT_TARGET = chat
+CHAT_SRC = chat.m
 
 # Optional: offline shader compilation (faster startup, but not required)
 METALC = xcrun -sdk macosx metal

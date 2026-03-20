@@ -66,20 +66,37 @@
 
 // ============================================================================
 // Model constants
-// ============================================================================
-
-#define HIDDEN_DIM          3072
-#define NUM_LAYERS          48
-#define NUM_ATTN_HEADS      32
+// =========================================================================// ---- Model Dimensions Configuration ----
+#ifdef QWEN_35B
+// Qwen3.5-35B-A3B configs
+#define NUM_LAYERS          40
+#define HIDDEN_DIM          2048
+#define NUM_HEADS           16
 #define NUM_KV_HEADS        2
-#define HEAD_DIM            256
-#define VOCAB_SIZE          248320
-#define RMS_NORM_EPS        1e-6f
 #define NUM_EXPERTS         256
-#define NUM_EXPERTS_PER_TOK 8
-#define MOE_INTERMEDIATE    1024
-#define SHARED_INTERMEDIATE 1024
+#define EXPERT_INTERMEDIATE 512
+#define SHARED_INTERMEDIATE 512
+#define VOCAB_SIZE          248320
 #define FULL_ATTN_INTERVAL  4
+#else
+// Qwen3.5-122B-A10B configs (Default)
+#define NUM_LAYERS          48
+#define HIDDEN_DIM          3072
+#define NUM_HEADS           24
+#define NUM_KV_HEADS        8
+#define NUM_EXPERTS         256
+#define EXPERT_INTERMEDIATE 1024
+#define SHARED_INTERMEDIATE 1024
+#define VOCAB_SIZE          248320
+#define FULL_ATTN_INTERVAL  4
+#endif
+
+// Derived dimensions
+#define HEAD_DIM            (HIDDEN_DIM / NUM_HEADS)
+#define NUM_ATTN_HEADS      NUM_HEADS
+#define RMS_NORM_EPS        1e-6f
+#define NUM_EXPERTS_PER_TOK 8
+#define MOE_INTERMEDIATE    EXPERT_INTERMEDIATE
 #define GROUP_SIZE          64
 #define BITS                4
 
@@ -6331,12 +6348,14 @@ int main(int argc, char **argv) {
             {"gpu-linear",    no_argument,       0, 'G'},
             {"think-budget",  required_argument, 0, 'B'},
             {"serve",         required_argument, 0, 'R'},
+            {"quiet",         no_argument,       0, 'q'},
             {"help",          no_argument,       0, 'h'},
             {0, 0, 0, 0}
         };
 
+        int quiet_mode = 0;
         int c;
-        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2Gh", long_options, NULL)) != -1) {
+        while ((c = getopt_long(argc, argv, "m:w:j:v:p:P:t:k:C:M:R:B:LSTFE2Gqh", long_options, NULL)) != -1) {
             switch (c) {
                 case 'm': model_path = optarg; break;
                 case 'w': weights_path = optarg; break;
@@ -6357,6 +6376,7 @@ int main(int argc, char **argv) {
                 case 'G': gpu_linear_attn_enabled = 1; break;
                 case 'B': g_think_budget = atoi(optarg); break;
                 case 'R': serve_port = atoi(optarg); break;
+                case 'q': quiet_mode = 1; break;
                 case 'h': print_usage(argv[0]); return 0;
                 default:  print_usage(argv[0]); return 1;
             }
@@ -6797,8 +6817,10 @@ int main(int argc, char **argv) {
             double tok_time = t_gen_end - t_gen_start;
 
             // Print progress to stderr
-            fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)\n",
-                    gen, max_tokens, next_token, tok_time, 1000.0 / tok_time);
+            if (!quiet_mode) {
+                fprintf(stderr, "  [gen %d/%d] token_id=%d (%.0f ms, %.2f tok/s)\n",
+                        gen, max_tokens, next_token, tok_time, 1000.0 / tok_time);
+            }
         }
 
         if (g_timing_enabled) timing_print();

@@ -62,6 +62,13 @@ def main():
     with open(index_path) as f:
         idx = json.load(f)
 
+    # Load config.json if it exists
+    config_path = model_path / 'config.json'
+    model_config = {}
+    if config_path.exists():
+        with open(config_path) as f:
+            model_config = json.load(f).get('text_config', {})
+
     weight_map = idx['weight_map']
 
     # Filter: keep only language_model weights, skip vision_tower
@@ -116,41 +123,48 @@ def main():
 
     # Write binary file
     bin_path = output_dir / 'model_weights.bin'
+    # Determine config parameters dynamically
+    num_layers = model_config.get('num_hidden_layers', 48)
+    
     manifest = {
         "model": str(model_path),
         "num_tensors": len(all_tensors),
         "tensors": {},
         # Model config for the C engine
         "config": {
-            "hidden_size": 3072,
-            "num_hidden_layers": 48,
-            "num_attention_heads": 32,
-            "num_key_value_heads": 2,
-            "head_dim": 256,
-            "vocab_size": 248320,
-            "rms_norm_eps": 1e-6,
-            "num_experts": 256,
-            "num_experts_per_tok": 8,
-            "moe_intermediate_size": 1024,
-            "shared_expert_intermediate_size": 1024,
-            "full_attention_interval": 4,
-            "linear_num_value_heads": 64,
-            "linear_num_key_heads": 16,
-            "linear_key_head_dim": 128,
-            "linear_value_head_dim": 128,
-            "linear_conv_kernel_dim": 4,
-            "partial_rotary_factor": 0.25,
-            "rope_theta": 10000000.0,
+            "hidden_size": model_config.get('hidden_size', 3072),
+            "num_hidden_layers": num_layers,
+            "num_attention_heads": model_config.get('num_attention_heads', 32),
+            "num_key_value_heads": model_config.get('num_key_value_heads', 2),
+            "head_dim": model_config.get('head_dim', 256),
+            "vocab_size": model_config.get('vocab_size', 248320),
+            "rms_norm_eps": model_config.get('rms_norm_eps', 1e-6),
+            "num_experts": model_config.get('num_experts', 256),
+            "num_experts_per_tok": model_config.get('num_experts_per_tok', 8),
+            "moe_intermediate_size": model_config.get('moe_intermediate_size', 1024),
+            "shared_expert_intermediate_size": model_config.get('shared_expert_intermediate_size', 1024),
+            "full_attention_interval": model_config.get('full_attention_interval', 4),
+            "linear_num_value_heads": model_config.get('linear_num_value_heads', 64),
+            "linear_num_key_heads": model_config.get('linear_num_key_heads', 16),
+            "linear_key_head_dim": model_config.get('linear_key_head_dim', 128),
+            "linear_value_head_dim": model_config.get('linear_value_head_dim', 128),
+            "linear_conv_kernel_dim": model_config.get('linear_conv_kernel_dim', 4),
+            "partial_rotary_factor": model_config.get('rope_parameters', {}).get('partial_rotary_factor', 0.25),
+            "rope_theta": model_config.get('rope_parameters', {}).get('rope_theta', 10000000.0),
         }
     }
 
     # Layer type map
+    # Layer type map
     layer_types = []
-    for i in range(48):
-        if (i + 1) % 4 == 0:
-            layer_types.append("full_attention")
-        else:
-            layer_types.append("linear_attention")
+    if 'layer_types' in model_config:
+        layer_types = model_config['layer_types']
+    else:
+        for i in range(num_layers):
+            if (i + 1) % 4 == 0:
+                layer_types.append("full_attention")
+            else:
+                layer_types.append("linear_attention")
     manifest["config"]["layer_types"] = layer_types
 
     print(f"\nWriting {bin_path}...")
